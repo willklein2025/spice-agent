@@ -1,0 +1,13 @@
+* RC low-pass filter with notebook-adjustable component parameters
+.param RVAL=1600 CVAL=1e-7
+V1 in 0 DC 0 AC 1
+R1 in out {RVAL}
+C1 out 0 {CVAL}
+.control
+set wr_singlescale
+set wr_vecnames
+ac dec 100 10 100k
+wrdata ac_response.dat vdb(out) vp(out)
+meas ac fc when vdb(out)=-3.0103
+.endc
+.end
