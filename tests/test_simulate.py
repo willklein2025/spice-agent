@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 import unittest
 from pathlib import Path
@@ -56,6 +57,35 @@ class SimulateRCTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "ngspice"):
             simulate_rc(2200, 1e-7)
         which.assert_called_once_with("ngspice")
+
+    @unittest.skipUnless(shutil.which("ngspice"), "ngspice is not installed")
+    def test_measured_cutoff_is_within_one_percent_of_theoretical(self) -> None:
+        component_pairs = (
+            (1000, 1e-6),
+            (4700, 1e-7),
+            (10000, 1e-8),
+        )
+        for resistance, capacitance in component_pairs:
+            with self.subTest(resistance=resistance, capacitance=capacitance):
+                response = simulate_rc(resistance, capacitance)
+                measured_cutoff = response["fc_measured_hz"]
+                if measured_cutoff is None:
+                    self.fail("ngspice did not report the measured cutoff")
+                self.assertLessEqual(
+                    abs(measured_cutoff / response["fc_theoretical_hz"] - 1),
+                    0.01,
+                )
+
+    @unittest.skipUnless(shutil.which("ngspice"), "ngspice is not installed")
+    def test_gain_is_about_minus_twenty_db_at_ten_times_cutoff(self) -> None:
+        response = simulate_rc(1000, 1e-6)
+        target_frequency = 10 * response["fc_theoretical_hz"]
+        gain_db = np.interp(
+            np.log10(target_frequency),
+            np.log10(response["frequency_hz"]),
+            response["gain_db"],
+        )
+        self.assertAlmostEqual(gain_db, -20, delta=0.5)
 
 
 if __name__ == "__main__":
