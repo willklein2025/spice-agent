@@ -1,17 +1,20 @@
 """Ask an LLM to design an RC low-pass filter using the spice-agent MCP server.
 
 Usage:
-    python agent.py "Design a low-pass filter with a 2.5 kHz cutoff using a 10 nF capacitor."
+    python agent.py "Design a low-pass filter with a 2.5 kHz cutoff using a 10 nF
+    capacitor."
 """
 import asyncio
 import sys
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelFallbackMiddleware, ModelRetryMiddleware
+from langchain_core.messages import BaseMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
-
 from pydantic import BaseModel
 
+
+DEFAULT_MODEL = "google_genai:gemini-3.7-flash"
 
 SYSTEM_PROMPT = (
     "You are an analog design assistant. Use the simulate_rc_lowpass tool to "
@@ -27,23 +30,24 @@ class FilterDesign(BaseModel):
     r_ohms: float
     c_farads: float
     simulated_cutoff_hz: float
-    notes: str   # short explanation of how the values were chosen
-       
-async def main(request: str) -> None:
+    notes: str
+
+
+async def run_agent(
+    request: str, model: str = DEFAULT_MODEL
+) -> tuple[FilterDesign, list[BaseMessage]]:
     client = MultiServerMCPClient(
         {
             "spice-agent": {
-                "command": sys.executable,          # the Python in your .venv
+                "command": sys.executable,
                 "args": ["-m", "spice_agent.server"],
                 "transport": "stdio",
             }
         }
     )
     tools = await client.get_tools()
-    print("Tools available:", [tool.name for tool in tools])
-
     agent = create_agent(
-        model="google_genai:gemini-3.7-flash",
+        model=model,
         tools=tools,
         system_prompt=SYSTEM_PROMPT,
         response_format=FilterDesign,
@@ -53,12 +57,18 @@ async def main(request: str) -> None:
         ],
     )
     result = await agent.ainvoke({"messages": [{"role": "user", "content": request}]})
+    design = FilterDesign.model_validate(result["structured_response"])
+    return design, result["messages"]
 
-    design = result["structured_response"]   # a FilterDesign object
-    print(f"\nStructured result: R = {design.r_ohms:g} ohms, "
-          f"C = {design.c_farads:g} F, cutoff = {design.simulated_cutoff_hz:g} Hz")
 
-    for message in result["messages"]:
+async def main(request: str, model: str = DEFAULT_MODEL) -> None:
+    design, messages = await run_agent(request, model)
+    print(
+        f"\nStructured result: R = {design.r_ohms:g} ohms, "
+        f"C = {design.c_farads:g} F, cutoff = {design.simulated_cutoff_hz:g} Hz"
+    )
+
+    for message in messages:
         if message.type == "ai" and message.tool_calls:
             for call in message.tool_calls:
                 print(f"-> {call['name']}({call['args']})")
@@ -69,5 +79,9 @@ async def main(request: str) -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main(" ".join(sys.argv[1:]) or
-                     "Design a low-pass filter with a 2.5 kHz cutoff using a 10 nF capacitor."))
+    asyncio.run(
+        main(
+            " ".join(sys.argv[1:])
+            or "Design a low-pass filter with a 2.5 kHz cutoff using a 10 nF capacitor."
+        )
+    )
