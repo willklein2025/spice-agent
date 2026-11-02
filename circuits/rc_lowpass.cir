@@ -6,7 +6,7 @@ C1 out 0 {CVAL}
 .control
 set wr_singlescale
 set wr_vecnames
-ac dec 100 10 100k
+ac dec 100 10 5Meg
 wrdata ac_response.dat vdb(out) vp(out)
 meas ac fc when vdb(out)=-3.0103
 .endc

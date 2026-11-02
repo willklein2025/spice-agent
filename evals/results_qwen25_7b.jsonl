@@ -1,0 +1,1 @@
+{"case_id": "unit-trap-uf", "model": "ollama:qwen2.5:7b", "prompt_version": "v2.1", "run": 1, "passed": false, "checks": {"cutoff_within_2_percent": false, "final_values_in_tool_call": false, "fixed_components_unchanged": false}, "tool_call_count": 0, "tokens": 0, "seconds": 71.434, "error": "RemoteProtocolError: Server disconnected without sending a response."}

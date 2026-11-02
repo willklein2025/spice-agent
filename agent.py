@@ -1,29 +1,58 @@
 """Ask an LLM to design an RC low-pass filter using the spice-agent MCP server.
 
 Usage:
-    python agent.py "Design a low-pass filter with a 2.5 kHz cutoff using a 10 nF
-    capacitor."
+    python agent.py "Design a low-pass filter with a 2.5 kHz cutoff using a 10 nF capacitor."
+    python agent.py --model google_genai:gemini-3.8-flash "Design a ..."
+
+Model names use the form "provider:model":
+    ollama:<name>          a local model served by Ollama (no API cost)
+    google_genai:<name>    Gemini through Google AI Studio (needs GOOGLE_API_KEY)
 """
+import argparse
 import asyncio
 import sys
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import ModelFallbackMiddleware, ModelRetryMiddleware
+from langchain.agents.middleware import (
+    ModelCallLimitMiddleware,
+    ModelFallbackMiddleware,
+    ModelRetryMiddleware,
+)
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from pydantic import BaseModel
 
+DEFAULT_MODEL = "google_genai:gemini-3.8-flash"
+#DEFAULT_MODEL = "ollama:qwen2.5:7b"
+# Cloud option: DEFAULT_MODEL = "google_genai:gemini-3.8-flash"
 
-DEFAULT_MODEL = "google_genai:gemini-3.7-flash"
+# Change PROMPT_VERSION whenever SYSTEM_PROMPT or the tools change, so results stay comparable.
+# v2.1 = v2 with the missing spaces between sentences fixed.
+# v3   = adds the find_standard_values tool; the agent no longer searches parts itself.
+PROMPT_VERSION = "v3"
 
 SYSTEM_PROMPT = (
-    "You are an analog design assistant. Use the simulate_rc_lowpass tool to "
-    "check every design you propose. Iterate until the simulated cutoff is "
-    "within 2% of the requested value, then report R, C, and the simulated cutoff. "
-    "Prefer standard E24 resistor values when you can still meet the 2% target. "
-    "Only call a value 'simulated' if you ran the tool with it in this conversation; "
-    "otherwise say 'calculated'. Answer in plain text, without LaTeX."
+    "You are an analog design assistant for RC low-pass filters. "
+    "Step 1: call find_standard_values with the target cutoff, any resistor or "
+    "capacitor the request fixes, and any series the request requires "
+    "(for example 'only E12 values' means resistor_series='E12', "
+    "capacitor_series='E12', allow_parallel_capacitors=false). "
+    "Step 2: pick the first option unless the request gives a reason not to, and "
+    "simulate exactly those r_ohms and c_farads with simulate_rc_lowpass. "
+    "Do not search for part combinations yourself. "
+    "If find_standard_values reports that no design meets the tolerance, simulate the "
+    "closest option and clearly state that the request cannot be met. "
+    "Report R, C, and the simulated cutoff; for parallel capacitors, name both parts. "
+    "Only call a value 'simulated' if you ran simulate_rc_lowpass with it in this "
+    "conversation; otherwise say 'calculated'. Answer in plain text, without LaTeX."
 )
+
+# Cost and runaway protection.
+MAX_MODEL_CALLS = 8          # model calls allowed per request; good runs use 2-4
+MAX_OUTPUT_TOKENS = 2048     # cap on each model response (Gemini: thinking included)
+MODEL_CALL_TIMEOUT_S = 120   # seconds per model call (local CPU models are slow)
+LOCAL_CONTEXT_TOKENS = 8192  # Ollama's default context is too small for the tools + history
 
 
 class FilterDesign(BaseModel):
@@ -33,8 +62,63 @@ class FilterDesign(BaseModel):
     notes: str
 
 
+class AgentStoppedEarly(Exception):
+    """The agent ended without a final design (for example, it hit the model-call limit).
+
+    Carries the conversation so far, so an evaluation can record what the agent tried.
+    """
+
+    def __init__(self, reason: str, messages: list[BaseMessage]) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.messages = messages
+
+
+# Errors that retrying cannot fix: billing (402), bad model name (404), quota (429),
+# and a local model that cannot call tools.
+NON_RETRYABLE_MARKERS = ("402", "404", "429", "does not support tools")
+
+
+def should_retry(error: Exception) -> bool:
+    """Retry temporary problems such as a 503 'high demand', but nothing in NON_RETRYABLE_MARKERS."""
+    message = str(error)
+    return not any(marker in message for marker in NON_RETRYABLE_MARKERS)
+
+
+def build_chat_model(model: str) -> BaseChatModel | str:
+    """Turn a "provider:model" name into a chat model with cost limits applied.
+
+    Unrecognized providers are passed through unchanged for LangChain to handle.
+    """
+    provider, _, name = model.partition(":")
+    if provider == "ollama":
+        from langchain_ollama import ChatOllama
+
+        return ChatOllama(
+            model=name,
+            temperature=0,                    # repeatable answers for evaluation
+            num_ctx=LOCAL_CONTEXT_TOKENS,
+            num_predict=MAX_OUTPUT_TOKENS,
+            client_kwargs={"timeout": MODEL_CALL_TIMEOUT_S},
+        )
+    if provider == "google_genai":
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        return ChatGoogleGenerativeAI(
+            model=name,
+            thinking_level="low",             # hidden thinking tokens are billed; keep them low
+            max_output_tokens=MAX_OUTPUT_TOKENS,
+            timeout=MODEL_CALL_TIMEOUT_S,
+            max_retries=1,                    # our retry middleware handles retries
+        )
+    return model
+
+
 async def run_agent(
-    request: str, model: str = DEFAULT_MODEL
+    request: str,
+    model: str = DEFAULT_MODEL,
+    fallback_model: str | None = None,
+    max_model_calls: int = MAX_MODEL_CALLS,
 ) -> tuple[FilterDesign, list[BaseMessage]]:
     client = MultiServerMCPClient(
         {
@@ -46,19 +130,39 @@ async def run_agent(
         }
     )
     tools = await client.get_tools()
+    middleware = [
+        # Hard stop on runaway loops. "end" stops the agent but keeps the conversation,
+        # so we can see what it was trying; run_agent then raises AgentStoppedEarly.
+        ModelCallLimitMiddleware(run_limit=max_model_calls, exit_behavior="end"),
+        ModelRetryMiddleware(
+            max_retries=2,
+            initial_delay=5.0,
+            on_failure="error",
+            retry_on=should_retry,
+        ),
+    ]
+    if fallback_model is not None:
+        middleware.append(ModelFallbackMiddleware(build_chat_model(fallback_model)))
+
     agent = create_agent(
-        model=model,
+        model=build_chat_model(model),
         tools=tools,
         system_prompt=SYSTEM_PROMPT,
         response_format=FilterDesign,
-        middleware=[
-            ModelRetryMiddleware(max_retries=4, initial_delay=5.0, on_failure="error"),
-            ModelFallbackMiddleware("google_genai:gemini-3.5-flash-lite"),
-        ],
+        middleware=middleware,
     )
     result = await agent.ainvoke({"messages": [{"role": "user", "content": request}]})
+    messages = result["messages"]
+    if result.get("structured_response") is None:
+        last_text = messages[-1].text if messages else ""
+        reason = (
+            "model call limit reached"
+            if "limit" in last_text.lower()
+            else "agent ended without a final design"
+        )
+        raise AgentStoppedEarly(reason, messages)
     design = FilterDesign.model_validate(result["structured_response"])
-    return design, result["messages"]
+    return design, messages
 
 
 async def main(request: str, model: str = DEFAULT_MODEL) -> None:
@@ -79,9 +183,14 @@ async def main(request: str, model: str = DEFAULT_MODEL) -> None:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Design an RC low-pass filter with an AI agent.")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="provider:model name")
+    parser.add_argument("request", nargs="*", help="the design request")
+    args = parser.parse_args()
     asyncio.run(
         main(
-            " ".join(sys.argv[1:])
-            or "Design a low-pass filter with a 2.5 kHz cutoff using a 10 nF capacitor."
+            " ".join(args.request)
+            or "Design a low-pass filter with a 2.5 kHz cutoff using a 10 nF capacitor.",
+            args.model,
         )
     )

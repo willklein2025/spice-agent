@@ -2,8 +2,10 @@ import numpy as np
 
 if __package__:
     from .simulate import simulate_rc
+    from .standard_values import describe_options, find_options
 else:
     from simulate import simulate_rc
+    from standard_values import describe_options, find_options
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -62,6 +64,54 @@ def simulate_rc_lowpass(r_ohms: float, c_farads: float) -> str:
         summary.append("No gain sample frequencies fell within the simulated sweep.")
 
     return " ".join(summary)
+
+
+@server.tool(
+    name="find_standard_values",
+    description=(
+        "Find RC low-pass designs built from standard component values. Give the "
+        "target cutoff in Hz and, optionally, a resistor (ohms) or capacitor (farads) "
+        "the design must keep. Returns up to three options ranked by fewest parts, "
+        "then smallest error, each with its calculated (not simulated) cutoff, or "
+        "says that no standard-value design meets the tolerance. Series: 'E12', "
+        "'E24' or 'E96'. Two capacitors in parallel are allowed unless "
+        "allow_parallel_capacitors is false. Call this before choosing parts, then "
+        "confirm the chosen design with simulate_rc_lowpass."
+    ),
+)
+def find_standard_values(
+    target_cutoff_hz: float,
+    fixed_r_ohms: float | None = None,
+    fixed_c_farads: float | None = None,
+    resistor_series: str = "E96",
+    capacitor_series: str = "E12",
+    allow_parallel_capacitors: bool = True,
+    tolerance_percent: float = 2.0,
+) -> str:
+    """Return a compact list of standard-value design options."""
+    tolerance_fraction = tolerance_percent / 100
+    try:
+        options, meets_tolerance = find_options(
+            target_cutoff_hz,
+            fixed_r_ohms=fixed_r_ohms,
+            fixed_c_farads=fixed_c_farads,
+            resistor_series=resistor_series,
+            capacitor_series=capacitor_series,
+            allow_parallel_capacitors=allow_parallel_capacitors,
+            tolerance_fraction=tolerance_fraction,
+        )
+    except ValueError as error:
+        return f"Invalid request: {error}"   # let the agent correct itself
+    return describe_options(
+        target_cutoff_hz,
+        options,
+        meets_tolerance,
+        tolerance_fraction,
+        resistor_series,
+        capacitor_series,
+        fixed_r=fixed_r_ohms is not None,
+        fixed_c=fixed_c_farads is not None,
+    )
 
 
 if __name__ == "__main__":
