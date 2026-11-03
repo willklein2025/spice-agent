@@ -17,6 +17,16 @@ class SimulationResult(TypedDict):
     fc_theoretical_hz: float
 
 
+def _is_unmeasurable_cutoff(line: str) -> bool:
+    """ngspice reports a cutoff outside the AC sweep as a measure 'error'.
+
+    That is not a failed simulation: the response is still valid, the -3 dB point
+    just lies outside the swept range, so fc_measured_hz is returned as None.
+    """
+    lowered = line.lower()
+    return "measure" in lowered and "out of interval" in lowered
+
+
 def simulate_rc(r_ohms: float, c_farads: float) -> SimulationResult:
     """Simulate one RC low-pass filter and return its AC response."""
     if not math.isfinite(r_ohms) or r_ohms <= 0:
@@ -59,7 +69,7 @@ def simulate_rc(r_ohms: float, c_farads: float) -> SimulationResult:
                 ("stderr", result.stderr),
             )
             for line in output.splitlines()
-            if "ERROR" in line.upper()
+            if "ERROR" in line.upper() and not _is_unmeasurable_cutoff(line)
         ]
         if error_lines:
             raise RuntimeError(

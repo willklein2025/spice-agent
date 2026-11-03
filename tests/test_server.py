@@ -20,8 +20,8 @@ class SimulateRCLowpassToolTests(unittest.TestCase):
         summary = simulate_rc_lowpass(15915.5, 1e-8)
 
         simulate_rc.assert_called_once_with(15915.5, 1e-8)
-        self.assertIn("Theoretical cutoff: 1000 Hz.", summary)
-        self.assertIn("Measured cutoff: 1000 Hz.", summary)
+        self.assertTrue(summary.startswith("VERIFIED BY SIMULATION: measured cutoff 1000 Hz"))
+        self.assertIn("(formula predicts 1000 Hz)", summary)
         self.assertIn("100 Hz: -0.100 dB", summary)
         self.assertIn("1000 Hz: -3.000 dB", summary)
         self.assertIn("10000 Hz: -20.000 dB", summary)
@@ -41,10 +41,25 @@ class SimulateRCLowpassToolTests(unittest.TestCase):
 
         summary = simulate_rc_lowpass(1.0, 1.0)
 
-        self.assertIn("Measured cutoff: unavailable.", summary)
+        self.assertTrue(summary.startswith("NOT VERIFIED"))
+        self.assertIn("simulated range (10 Hz to 100 Hz)", summary)
+        self.assertIn("Calculated (formula) cutoff: 10000 Hz. This value was NOT simulated", summary)
+        self.assertNotIn("VERIFIED BY SIMULATION", summary)
         self.assertIn(
             "No gain sample frequencies fell within the simulated sweep.", summary
         )
+
+
+@unittest.skipUnless(__import__("shutil").which("ngspice"), "ngspice is not installed")
+class SimulateToolWithNgspiceTests(unittest.TestCase):
+    def test_cutoff_below_sweep_is_reported_as_not_verified(self) -> None:
+        summary = simulate_rc_lowpass(5360, 1e-5)        # about 3 Hz, below the 10 Hz sweep start
+        self.assertTrue(summary.startswith("NOT VERIFIED"))
+        self.assertIn("Calculated (formula) cutoff: 2.96931 Hz", summary)
+
+    def test_normal_design_is_verified(self) -> None:
+        summary = simulate_rc_lowpass(6340, 1e-8)
+        self.assertTrue(summary.startswith("VERIFIED BY SIMULATION: measured cutoff 2510.33 Hz"))
 
 
 if __name__ == "__main__":

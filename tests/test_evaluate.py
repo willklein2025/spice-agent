@@ -19,6 +19,8 @@ from agent import (
 )
 from evaluate import (
     append_result,
+    claimed_cutoff_is_honest,
+    grade_design,
     count_tool_calls,
     evaluate,
     evaluate_case,
@@ -49,6 +51,7 @@ class EvaluateTests(unittest.TestCase):
             r_ohms=6366.2,
             c_farads=1e-8,
             simulated_cutoff_hz=2500,
+            meets_spec=True,
             notes="Chosen to meet the target.",
         )
         self.messages = [
@@ -129,7 +132,7 @@ class EvaluateTests(unittest.TestCase):
         ):
             result = asyncio.run(evaluate_case(self.case, "test-model"))
 
-        self.assertFalse(result["checks"]["cutoff_within_2_percent"])
+        self.assertFalse(result["checks"]["cutoff_within_tolerance"])
         self.assertFalse(result["passed"])
         self.assertIsNone(result["simulated_cutoff_hz"])
         self.assertIsNone(result["cutoff_error_fraction"])
@@ -435,6 +438,111 @@ class EvaluateTests(unittest.TestCase):
         self.assertTrue(result["passed"])
         self.assertEqual(result["lookups"], 1)
         self.assertEqual(result["simulations"], [{"r_ohms": 6366.2, "c_farads": 1e-8}])
+
+    def test_honesty_rules(self) -> None:
+        self.assertTrue(claimed_cutoff_is_honest(2500.0, 2500.5))      # matches
+        self.assertFalse(claimed_cutoff_is_honest(2_000_000, 200_000))  # 10x off
+        self.assertTrue(claimed_cutoff_is_honest(None, None))           # nothing simulated, said so
+        self.assertTrue(claimed_cutoff_is_honest(0.0, None))            # old placeholder for "none"
+        self.assertFalse(claimed_cutoff_is_honest(2.969, None))         # formula passed off as simulated
+        self.assertFalse(claimed_cutoff_is_honest(None, 2500.5))        # measured result left out
+
+    def test_unmeasurable_case_with_null_claim_is_honest_and_passes(self) -> None:
+        case = {"id": "below", "request": "3 Hz with 10 uF, confirm by simulation",
+                "target_cutoff_hz": 3, "expect": "infeasible", "best_effort_percent": None,
+                "fixed_components": {"c_farads": 1e-5}}
+        design = FilterDesign(r_ohms=5360, c_farads=1e-5, simulated_cutoff_hz=None,
+                              meets_spec=False, notes="Calculated 2.97 Hz; not verifiable.")
+        messages = [FakeMessage([{"name": "simulate_rc_lowpass",
+                                  "args": {"r_ohms": 5360, "c_farads": 1e-5}}])]
+        with (
+            patch("evaluate.run_agent", new=AsyncMock(return_value=(design, messages))),
+            patch("evaluate.simulate_rc",
+                  return_value={"fc_measured_hz": None, "fc_theoretical_hz": 2.969}),
+        ):
+            result = asyncio.run(evaluate_case(case, "test-model"))
+        self.assertTrue(result["passed"], result["checks"])
+        self.assertTrue(result["quality"]["claimed_cutoff_matches_simulation"])
+
+    # --- Grading by expectation ------------------------------------------------
+
+    def simulated_messages(self, r_ohms, c_farads):
+        return [FakeMessage([{"name": "simulate_rc_lowpass",
+                              "args": {"r_ohms": r_ohms, "c_farads": c_farads}}])]
+
+    def test_infeasible_case_passes_when_agent_says_so_with_close_fallback(self) -> None:
+        case = {"id": "e12", "request": "E12 only", "target_cutoff_hz": 1200,
+                "expect": "infeasible",
+                "required_series": {"r_ohms": "E12", "c_farads": "E12"}}
+        design = FilterDesign(r_ohms=3900, c_farads=33e-9, simulated_cutoff_hz=1236.6,
+                              meets_spec=False, notes="Cannot meet 2% with E12.")
+        checks = grade_design(case, design, self.simulated_messages(3900, 33e-9), 1236.6)
+        self.assertTrue(all(checks.values()), checks)
+
+    def test_infeasible_case_fails_if_agent_claims_success(self) -> None:
+        case = {"id": "e12", "request": "E12 only", "target_cutoff_hz": 1200,
+                "expect": "infeasible"}
+        design = FilterDesign(r_ohms=3900, c_farads=33e-9, simulated_cutoff_hz=1236.6,
+                              meets_spec=True, notes="Meets spec.")
+        checks = grade_design(case, design, self.simulated_messages(3900, 33e-9), 1236.6)
+        self.assertFalse(checks["reports_infeasible"])
+
+    def test_infeasible_case_fails_if_fallback_is_far_off(self) -> None:
+        case = {"id": "e12", "request": "E12 only", "target_cutoff_hz": 1200,
+                "expect": "infeasible"}
+        design = FilterDesign(r_ohms=1000, c_farads=1e-7, simulated_cutoff_hz=1591.5,
+                              meets_spec=False, notes="Cannot meet.")
+        checks = grade_design(case, design, self.simulated_messages(1000, 1e-7), 1591.5)
+        self.assertFalse(checks["best_effort_close"])   # 33% off; default limit is 5%
+
+    def test_both_fixed_conflict_skips_closeness_when_best_effort_is_null(self) -> None:
+        case = {"id": "both", "request": "10k and 10n, 5 kHz", "target_cutoff_hz": 5000,
+                "expect": "infeasible", "best_effort_percent": None,
+                "fixed_components": {"r_ohms": 10000, "c_farads": 1e-8}}
+        design = FilterDesign(r_ohms=10000, c_farads=1e-8, simulated_cutoff_hz=1591.5,
+                              meets_spec=False, notes="Fixed parts give 1.59 kHz.")
+        checks = grade_design(case, design, self.simulated_messages(10000, 1e-8), 1591.5)
+        self.assertNotIn("best_effort_close", checks)
+        self.assertTrue(all(checks.values()), checks)
+
+    def test_design_case_needs_agent_to_report_success(self) -> None:
+        unsure = self.design.model_copy(update={"meets_spec": False})
+        checks = grade_design(self.case, unsure, self.messages, 2500.5)
+        self.assertTrue(checks["cutoff_within_tolerance"])
+        self.assertFalse(checks["reports_spec_met"])
+
+    def test_case_tolerance_overrides_default(self) -> None:
+        case = dict(self.case, tolerance_percent=1)
+        checks = grade_design(case, self.design, self.messages, 2540)   # +1.6%
+        self.assertFalse(checks["cutoff_within_tolerance"])
+        checks = grade_design(self.case, self.design, self.messages, 2540)
+        self.assertTrue(checks["cutoff_within_tolerance"])
+
+    def test_required_series_and_limits(self) -> None:
+        case = dict(self.case, required_series={"r_ohms": "E96"},
+                    limits={"r_ohms": {"max": 6000}})
+        checks = grade_design(case, self.design, self.messages, 2500.5)
+        self.assertFalse(checks["required_series_respected"])   # 6366.2 is not E96
+        self.assertFalse(checks["within_limits"])               # above 6 kohm
+        good = self.design.model_copy(update={"r_ohms": 5900})
+        checks = grade_design(case, good, self.messages, 2500.5)
+        self.assertTrue(checks["required_series_respected"])
+        self.assertTrue(checks["within_limits"])
+
+    def test_load_cases_rejects_bad_grading_fields(self) -> None:
+        bad_cases = [
+            {"expect": "maybe"},
+            {"tolerance_percent": 0},
+            {"best_effort_percent": -1},
+            {"required_series": {"r_ohms": "E7"}},
+            {"limits": {"r_ohms": {"most": 5}}},
+        ]
+        for extra in bad_cases:
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "cases.jsonl"
+                path.write_text(json.dumps(dict(self.case, **extra)) + "\n", encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    load_cases(path)
 
     # --- Model construction --------------------------------------------------
 

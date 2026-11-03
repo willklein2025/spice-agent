@@ -47,14 +47,15 @@ class AgentEndToEndTests(unittest.TestCase):
             ("find_standard_values", {"target_cutoff_hz": 2500, "fixed_c_farads": 1e-8}),
             ("simulate_rc_lowpass", {"r_ohms": 6340, "c_farads": 1e-8}),
             ("FilterDesign", {"r_ohms": 6340, "c_farads": 1e-8,
-                              "simulated_cutoff_hz": 2510.33, "notes": "E96 resistor."}),
+                              "simulated_cutoff_hz": 2510.33, "meets_spec": True,
+                              "notes": "E96 resistor."}),
         ])
         with patch("agent.build_chat_model", return_value=model):
             design, messages = asyncio.run(run_agent("2.5 kHz with 10 nF", "scripted"))
         self.assertEqual((design.r_ohms, design.c_farads), (6340, 1e-8))
         tool_results = [m.text for m in messages if m.type == "tool"]
         self.assertIn("10 nF", tool_results[0])                 # lookup result
-        self.assertIn("Measured cutoff: 2510.33 Hz", tool_results[1])  # real ngspice run
+        self.assertIn("VERIFIED BY SIMULATION: measured cutoff 2510.33 Hz", tool_results[1])  # real ngspice
 
     def test_runaway_is_stopped_with_its_trace(self) -> None:
         model = ScriptedModel(script=[("loop", {})])

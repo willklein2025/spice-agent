@@ -87,6 +87,14 @@ class SimulateRCTests(unittest.TestCase):
         )
         self.assertAlmostEqual(gain_db, -20, delta=0.5)
 
+    @unittest.skipUnless(shutil.which("ngspice"), "ngspice is not installed")
+    def test_cutoff_outside_the_sweep_is_unmeasured_not_an_error(self) -> None:
+        # About 3 Hz: below the 10 Hz start of the AC sweep in rc_lowpass.cir.
+        response = simulate_rc(5360, 1e-5)
+        self.assertIsNone(response["fc_measured_hz"])
+        self.assertAlmostEqual(response["fc_theoretical_hz"], 2.969, places=2)
+        self.assertGreater(len(response["frequency_hz"]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

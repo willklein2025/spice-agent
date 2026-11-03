@@ -21,7 +21,7 @@ from langchain.agents.middleware import (
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 DEFAULT_MODEL = "google_genai:gemini-3.8-flash"
 #DEFAULT_MODEL = "ollama:qwen2.5:7b"
@@ -30,19 +30,30 @@ DEFAULT_MODEL = "google_genai:gemini-3.8-flash"
 # Change PROMPT_VERSION whenever SYSTEM_PROMPT or the tools change, so results stay comparable.
 # v2.1 = v2 with the missing spaces between sentences fixed.
 # v3   = adds the find_standard_values tool; the agent no longer searches parts itself.
-PROMPT_VERSION = "v3"
+# v3.1 = agent reports meets_spec; handles fixed R and C, other tolerances, and limits.
+# v3.2 = prompt unchanged; simulate_rc_lowpass now leads with VERIFIED / NOT VERIFIED
+#        so an unmeasurable cutoff cannot be mistaken for a simulated one.
+# v3.3 = simulated_cutoff_hz may be null ("not simulated") instead of a placeholder 0.
+PROMPT_VERSION = "v3.3"
 
 SYSTEM_PROMPT = (
     "You are an analog design assistant for RC low-pass filters. "
     "Step 1: call find_standard_values with the target cutoff, any resistor or "
-    "capacitor the request fixes, and any series the request requires "
+    "capacitor the request fixes, the tolerance if the request gives one "
+    "(tolerance_percent; otherwise 2), and any series the request requires "
     "(for example 'only E12 values' means resistor_series='E12', "
     "capacitor_series='E12', allow_parallel_capacitors=false). "
-    "Step 2: pick the first option unless the request gives a reason not to, and "
-    "simulate exactly those r_ohms and c_farads with simulate_rc_lowpass. "
+    "If the request fixes both R and C, there is nothing to choose: do not change "
+    "them, simulate them, and report whether they meet the spec. "
+    "Step 2: pick the first option that satisfies every limit in the request (for "
+    "example a maximum resistor value), and simulate exactly those r_ohms and "
+    "c_farads with simulate_rc_lowpass. If no listed option satisfies the limits, "
+    "call find_standard_values again with a fixed value inside the limits. "
     "Do not search for part combinations yourself. "
-    "If find_standard_values reports that no design meets the tolerance, simulate the "
-    "closest option and clearly state that the request cannot be met. "
+    "If no design can meet the request, simulate the closest option and clearly "
+    "state that the request cannot be met. "
+    "Set meets_spec to true only if the simulated cutoff is within the requested "
+    "tolerance and every constraint in the request is satisfied; otherwise false. "
     "Report R, C, and the simulated cutoff; for parallel capacitors, name both parts. "
     "Only call a value 'simulated' if you ran simulate_rc_lowpass with it in this "
     "conversation; otherwise say 'calculated'. Answer in plain text, without LaTeX."
@@ -58,7 +69,14 @@ LOCAL_CONTEXT_TOKENS = 8192  # Ollama's default context is too small for the too
 class FilterDesign(BaseModel):
     r_ohms: float
     c_farads: float
-    simulated_cutoff_hz: float
+    simulated_cutoff_hz: float | None = Field(
+        description="The cutoff measured by simulate_rc_lowpass for the final design, "
+        "or null if the simulation could not measure it. Never put a calculated value here."
+    )
+    meets_spec: bool = Field(
+        description="True only if the simulated cutoff is within the requested "
+        "tolerance and every constraint in the request is met."
+    )
     notes: str
 
 
@@ -169,7 +187,8 @@ async def main(request: str, model: str = DEFAULT_MODEL) -> None:
     design, messages = await run_agent(request, model)
     print(
         f"\nStructured result: R = {design.r_ohms:g} ohms, "
-        f"C = {design.c_farads:g} F, cutoff = {design.simulated_cutoff_hz:g} Hz"
+        f"C = {design.c_farads:g} F, simulated cutoff = "
+        f"{'not measured' if design.simulated_cutoff_hz is None else f'{design.simulated_cutoff_hz:g} Hz'}"
     )
 
     for message in messages:

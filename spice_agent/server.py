@@ -23,29 +23,41 @@ server = FastMCP(
 @server.tool(
     name="simulate_rc_lowpass",
     description=(
-        "Simulate an RC low-pass filter and return its cutoff frequency, "
-        "plus gain at up to three frequencies around the cutoff. "
-        "Provide resistance in ohms and capacitance in farads."
+        "Simulate an RC low-pass filter in ngspice. Reports whether the cutoff was "
+        "verified by simulation (measured) or could not be measured, plus gain at up "
+        "to three frequencies around the cutoff. Provide resistance in ohms and "
+        "capacitance in farads."
     ),
 )
 def simulate_rc_lowpass(r_ohms: float, c_farads: float) -> str:
-    """Return a compact summary of an RC low-pass filter simulation."""
+    """Return a compact summary of an RC low-pass filter simulation.
+
+    The first words always say whether the cutoff was measured. When it was not,
+    the formula value is labeled as calculated so the agent cannot mistake it for
+    a simulation result (v3.2: the agent previously reported it as "simulated").
+    """
     response = simulate_rc(r_ohms, c_farads)
-    cutoff_hz = response["fc_theoretical_hz"]
-    measured_cutoff_hz = response["fc_measured_hz"]
+    calculated_hz = response["fc_theoretical_hz"]
+    measured_hz = response["fc_measured_hz"]
     frequencies = response["frequency_hz"]
     gains_db = response["gain_db"]
 
-    summary = [
-        f"Theoretical cutoff: {cutoff_hz:.6g} Hz.",
-        (
-            f"Measured cutoff: {measured_cutoff_hz:.6g} Hz."
-            if measured_cutoff_hz is not None
-            else "Measured cutoff: unavailable."
-        ),
-    ]
+    if measured_hz is not None:
+        summary = [
+            f"VERIFIED BY SIMULATION: measured cutoff {measured_hz:.6g} Hz "
+            f"(formula predicts {calculated_hz:.6g} Hz)."
+        ]
+    else:
+        summary = [
+            "NOT VERIFIED: the simulation ran, but the cutoff lies outside the "
+            f"simulated range ({frequencies[0]:.6g} Hz to {frequencies[-1]:.6g} Hz), "
+            "so it could not be measured.",
+            f"Calculated (formula) cutoff: {calculated_hz:.6g} Hz. This value was NOT "
+            "simulated: do not report it as a simulated cutoff, and treat the design "
+            "as unverified (it does not meet a requirement to confirm by simulation).",
+        ]
 
-    sample_frequencies = (0.1 * cutoff_hz, cutoff_hz, 10 * cutoff_hz)
+    sample_frequencies = (0.1 * calculated_hz, calculated_hz, 10 * calculated_hz)
     samples = [
         (
             frequency,
@@ -59,7 +71,7 @@ def simulate_rc_lowpass(r_ohms: float, c_farads: float) -> str:
             f"{frequency:.6g} Hz: {gain_db:.3f} dB"
             for frequency, gain_db in samples
         )
-        summary.append(f"Gain samples: {gain_summary}.")
+        summary.append(f"Simulated gain samples: {gain_summary}.")
     else:
         summary.append("No gain sample frequencies fell within the simulated sweep.")
 

@@ -1,7 +1,8 @@
 """Run resumable evaluations of the RC filter design agent.
 
 Usage:
-    python evaluate.py [--model MODEL] [--limit 6] [--runs 1] [--results PATH] [--case-timeout 300]
+    python evaluate.py [--model MODEL] [--limit 6] [--runs 1] [--cases PATH] [--results PATH]
+                       [--case-timeout 300]
 """
 
 import argparse
@@ -16,6 +17,7 @@ from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededE
 
 from agent import DEFAULT_MODEL, PROMPT_VERSION, AgentStoppedEarly, FilterDesign, run_agent
 from spice_agent.simulate import simulate_rc
+from spice_agent.standard_values import E_SERIES, is_standard_value
 
 try:
     from langchain_google_genai.chat_models import GoogleRateLimitError
@@ -33,6 +35,9 @@ LOOKUP_TOOL_NAME = "find_standard_values"
 FIXED_COMPONENT_NAMES = {"r_ohms", "c_farads"}
 CASE_TIMEOUT_S = 300          # wall-clock limit for one case; a runaway becomes a FAIL
 HONESTY_TOLERANCE = 0.005     # claimed cutoff must match the re-simulation within 0.5%
+DEFAULT_TOLERANCE_PERCENT = 2.0
+DEFAULT_BEST_EFFORT_PERCENT = 5.0   # infeasible cases: how close the fallback design must be
+EXPECTATIONS = {"design", "infeasible"}
 
 # Problems no amount of retrying will fix during this run. The evaluation stops,
 # nothing is recorded for the case, and it runs again next time.
@@ -114,17 +119,51 @@ def load_cases(path: Path = CASES_PATH) -> list[dict[str, Any]]:
                 f"{', '.join(sorted(unknown_components))}"
             )
         for name, value in fixed_components.items():
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(value)
-                or value <= 0
-            ):
+            if not _is_positive_number(value):
                 raise ValueError(
                     f"Case {case_id!r} fixed component {name} must be positive "
                     "and finite"
                 )
+        _validate_grading_fields(case_id, case)
     return cases
+
+
+def _is_positive_number(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def _validate_grading_fields(case_id: str, case: dict[str, Any]) -> None:
+    """Check the optional fields that change how a case is graded."""
+    expect = case.get("expect", "design")
+    if expect not in EXPECTATIONS:
+        raise ValueError(f"Case {case_id!r} expect must be one of {sorted(EXPECTATIONS)}")
+    if not _is_positive_number(case.get("tolerance_percent", DEFAULT_TOLERANCE_PERCENT)):
+        raise ValueError(f"Case {case_id!r} tolerance_percent must be positive")
+    best_effort = case.get("best_effort_percent", DEFAULT_BEST_EFFORT_PERCENT)
+    if best_effort is not None and not _is_positive_number(best_effort):
+        raise ValueError(f"Case {case_id!r} best_effort_percent must be positive or null")
+    for part, series in case.get("required_series", {}).items():
+        if part not in FIXED_COMPONENT_NAMES or series not in E_SERIES:
+            raise ValueError(
+                f"Case {case_id!r} required_series must map r_ohms/c_farads to "
+                f"one of {', '.join(E_SERIES)}"
+            )
+    for part, bounds in case.get("limits", {}).items():
+        if (
+            part not in FIXED_COMPONENT_NAMES
+            or not isinstance(bounds, dict)
+            or set(bounds) - {"min", "max"}
+            or not all(_is_positive_number(v) for v in bounds.values())
+        ):
+            raise ValueError(
+                f"Case {case_id!r} limits must look like "
+                '{"r_ohms": {"max": 10000}} with positive numbers'
+            )
 
 
 def result_key(record: dict[str, Any]) -> tuple[str, str, str, int]:
@@ -230,6 +269,69 @@ def fixed_components_unchanged(
         for name, value in case.get("fixed_components", {}).items()
     )
 
+def claimed_cutoff_is_honest(
+    claimed_hz: float | None, measured_hz: float | None
+) -> bool:
+    """Does the agent's "simulated cutoff" agree with our own re-simulation?
+
+    Honest:   both missing (nothing was simulated, and the agent said so), or
+              both present and within HONESTY_TOLERANCE.
+    Dishonest: a value claimed when nothing could be measured, or a measured
+              cutoff the agent left out or misreported.
+    A claim of 0 is treated as "not simulated" (older answers used 0 as a placeholder).
+    """
+    if claimed_hz is not None and claimed_hz <= 0:
+        claimed_hz = None
+    if claimed_hz is None or measured_hz is None:
+        return claimed_hz is None and measured_hz is None
+    return abs(claimed_hz / measured_hz - 1) <= HONESTY_TOLERANCE
+
+
+def grade_design(
+    case: dict[str, Any],
+    design: FilterDesign,
+    messages: list[Any],
+    measured_cutoff: float | None,
+) -> dict[str, bool]:
+    """Pass/fail checks for one answer, chosen by what the case expects.
+
+    expect "design":     the cutoff must be within tolerance and the agent must say so.
+    expect "infeasible": the agent must say the spec cannot be met, and (unless
+                         best_effort_percent is null) its fallback must be close.
+    """
+    tolerance = case.get("tolerance_percent", DEFAULT_TOLERANCE_PERCENT) / 100
+    error = (
+        None
+        if measured_cutoff is None
+        else abs(measured_cutoff / case["target_cutoff_hz"] - 1)
+    )
+    checks = {
+        "final_values_in_tool_call": final_values_in_tool_call(design, messages),
+        "fixed_components_unchanged": fixed_components_unchanged(case, design),
+    }
+    if case.get("expect", "design") == "design":
+        checks["cutoff_within_tolerance"] = error is not None and error <= tolerance
+        checks["reports_spec_met"] = design.meets_spec is True
+    else:
+        checks["reports_infeasible"] = design.meets_spec is False
+        best_effort = case.get("best_effort_percent", DEFAULT_BEST_EFFORT_PERCENT)
+        if best_effort is not None:
+            checks["best_effort_close"] = error is not None and error <= best_effort / 100
+    if case.get("required_series"):
+        checks["required_series_respected"] = all(
+            is_standard_value(getattr(design, part), series)
+            for part, series in case["required_series"].items()
+        )
+    if case.get("limits"):
+        checks["within_limits"] = all(
+            bounds.get("min", 0) * (1 - 1e-9)
+            <= getattr(design, part)
+            <= bounds.get("max", math.inf) * (1 + 1e-9)
+            for part, bounds in case["limits"].items()
+        )
+    return checks
+
+
 def total_tokens(messages: list[Any]) -> int:
     return sum(
         (getattr(message, "usage_metadata", None) or {}).get("total_tokens", 0)
@@ -256,12 +358,9 @@ async def evaluate_case(
         "model": model,
         "prompt_version": PROMPT_VERSION,
         "run": run,
+        "expect": case.get("expect", "design"),
         "passed": False,
-        "checks": {
-            "cutoff_within_2_percent": False,
-            "final_values_in_tool_call": False,
-            "fixed_components_unchanged": False,
-        },
+        "checks": {},
         "tool_call_count": 0,
         "lookups": 0,
         "tokens": 0,
@@ -288,8 +387,6 @@ async def evaluate_case(
             return record
 
         describe_trace(record, messages)
-        final_values_in_call = final_values_in_tool_call(design, messages)
-        fixed_unchanged = fixed_components_unchanged(case, design)
 
         # Grade by re-simulating the agent's final values ourselves.
         response = simulate_rc(design.r_ohms, design.c_farads)
@@ -297,35 +394,27 @@ async def evaluate_case(
         if measured_cutoff is None:
             # Do not substitute the formula: a missing measurement is worth seeing.
             cutoff_error = None
-            within_target = False
             record["cutoff_measurement_error"] = (
                 "ngspice did not report a measured cutoff for the final design"
             )
         else:
             cutoff_error = abs(measured_cutoff / case["target_cutoff_hz"] - 1)
-            within_target = cutoff_error <= 0.02
 
         record.update(
             {
                 "design": design.model_dump(),
                 "simulated_cutoff_hz": measured_cutoff,
                 "cutoff_error_fraction": cutoff_error,
-                "checks": {
-                    "cutoff_within_2_percent": within_target,
-                    "final_values_in_tool_call": final_values_in_call,
-                    "fixed_components_unchanged": fixed_unchanged,
-                },
+                "checks": grade_design(case, design, messages, measured_cutoff),
                 # Recorded for reporting, not part of pass/fail.
                 "quality": {
-                    "claimed_cutoff_matches_simulation": (
-                        measured_cutoff is not None
-                        and abs(design.simulated_cutoff_hz / measured_cutoff - 1)
-                        <= HONESTY_TOLERANCE
+                    "claimed_cutoff_matches_simulation": claimed_cutoff_is_honest(
+                        design.simulated_cutoff_hz, measured_cutoff
                     ),
                 },
             }
         )
-        record["passed"] = all(record["checks"].values())
+        record["passed"] = bool(record["checks"]) and all(record["checks"].values())
     except Exception as error:
         if fatal_error_hint(error) is not None:
             raise
@@ -410,6 +499,9 @@ async def evaluate(
             f"{result.get('tokens', 0):,} tokens, "
             f"{result['seconds']:.2f} s)"
         )
+        failed_checks = [name for name, ok in result.get("checks", {}).items() if not ok]
+        if failed_checks and "failure_reason" not in result and "error" not in result:
+            print(f"  Failed checks: {', '.join(failed_checks)}")
         if "failure_reason" in result:
             print(f"  Stopped: {result['failure_reason']}")
             for simulation in result.get("simulations", []):
@@ -459,6 +551,12 @@ def main() -> None:
         help="How many times to run each case (default: 1)",
     )
     parser.add_argument(
+        "--cases",
+        type=Path,
+        default=CASES_PATH,
+        help="JSONL file of test cases (default: evals/cases.jsonl)",
+    )
+    parser.add_argument(
         "--results",
         type=Path,
         default=RESULTS_PATH,
@@ -476,6 +574,7 @@ def main() -> None:
             model=args.model,
             limit=args.limit,
             runs=args.runs,
+            cases_path=args.cases,
             results_path=args.results,
             case_timeout_s=args.case_timeout,
         )
