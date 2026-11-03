@@ -86,6 +86,30 @@ class FindOptionsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             find_options(-5)
 
+    def test_single_capacitor_fallback_added_when_best_designs_need_two(self) -> None:
+        options, ok = find_options(150, fixed_r_ohms=47000)
+        self.assertTrue(ok)
+        self.assertEqual(options[0].part_count, 3)                 # parallel pair is best
+        singles = [o for o in options if len(o.capacitors_farads) == 1]
+        self.assertEqual([o.c_farads for o in singles], [22e-9])   # closest single, +2.6%
+
+    def test_infeasible_lists_single_capacitor_options_first(self) -> None:
+        # tight-single-e12: v3.4 Flash-Lite picked 5.6 nF + 5.6 nF despite "a single capacitor".
+        options, ok = find_options(
+            3000, fixed_r_ohms=4700, capacitor_series="E12", tolerance_fraction=0.005
+        )
+        self.assertFalse(ok)
+        self.assertEqual(options[0].capacitors_farads, (12e-9,))
+        self.assertEqual(options[-1].part_count, 3)                # parallel option comes last
+        self.assertTrue(all(len(o.capacitors_farads) == 1 for o in options[:-1]))
+
+    def test_no_parallel_options_when_not_allowed(self) -> None:
+        options, _ = find_options(
+            3000, fixed_r_ohms=4700, capacitor_series="E12", tolerance_fraction=0.005,
+            allow_parallel_capacitors=False,
+        )
+        self.assertTrue(all(len(o.capacitors_farads) == 1 for o in options))
+
 
 class FindStandardValuesToolTests(unittest.TestCase):
     def test_tool_lists_options_with_exact_values_to_simulate(self) -> None:
@@ -100,6 +124,17 @@ class FindStandardValuesToolTests(unittest.TestCase):
             allow_parallel_capacitors=False,
         )
         self.assertIn("NO standard-value design meets the tolerance", text)
+
+    def test_tool_labels_part_count_and_tolerance(self) -> None:
+        text = find_standard_values(3000, fixed_r_ohms=4700, tolerance_percent=0.5)
+        self.assertIn("1. [ONE capacitor; MISSES tolerance] R = 4.7 kohm", text)
+        self.assertIn("[TWO capacitors in parallel; MISSES tolerance]", text)
+        self.assertIn("choose only from the ONE capacitor options", text)
+
+    def test_no_part_count_advice_without_parallel_options(self) -> None:
+        text = find_standard_values(3300, fixed_c_farads=4.7e-9)
+        self.assertIn("[ONE capacitor; meets tolerance]", text)
+        self.assertNotIn("choose only from the ONE capacitor options", text)
 
     def test_tool_returns_message_instead_of_crashing(self) -> None:
         text = find_standard_values(1000, fixed_r_ohms=1000, fixed_c_farads=1e-7)

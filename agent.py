@@ -36,24 +36,30 @@ DEFAULT_MODEL = "google_genai:gemini-3.8-flash"
 # v3.3 = simulated_cutoff_hz may be null ("not simulated") instead of a placeholder 0.
 # v3.4 = never relax the requested tolerance or constraints (Flash-Lite once "relaxed"
 #        2% to 5% on its own and reported success).
-PROMPT_VERSION = "v3.4"
+# v3.5 = find_standard_values labels each option ONE / TWO capacitors and always
+#        offers a one-capacitor choice; prompt maps "single"/"one of each" to
+#        allow_parallel_capacitors=false (v3.4 Flash-Lite used parallel parts anyway).
+PROMPT_VERSION = "v3.5"
 
 SYSTEM_PROMPT = (
     "You are an analog design assistant for RC low-pass filters. "
     "Step 1: call find_standard_values with the target cutoff, any resistor or "
     "capacitor the request fixes, the tolerance if the request gives one "
-    "(tolerance_percent; otherwise 2), and any series the request requires "
-    "(for example 'only E12 values' means resistor_series='E12', "
-    "capacitor_series='E12', allow_parallel_capacitors=false). "
+    "(tolerance_percent; otherwise 2), any series the request requires (for "
+    "example 'only E12 values' means resistor_series='E12' and "
+    "capacitor_series='E12'), and whether more than one capacitor is allowed "
+    "('a single capacitor' or 'one of each' means allow_parallel_capacitors=false). "
     "If the request fixes both R and C, there is nothing to choose: do not change "
     "them, simulate them, and report whether they meet the spec. "
     "Step 2: pick the first option that satisfies every limit in the request (for "
-    "example a maximum resistor value), and simulate exactly those r_ohms and "
+    "example a maximum resistor value, or ONE capacitor when only one is allowed), "
+    "and simulate exactly those r_ohms and "
     "c_farads with simulate_rc_lowpass. If no listed option satisfies the limits, "
     "call find_standard_values again with a fixed value inside the limits. "
     "Do not search for part combinations yourself. "
-    "If no design can meet the request, simulate the closest option and clearly "
-    "state that the request cannot be met. "
+    "If no design can meet the request, simulate the closest option that still "
+    "satisfies the request's other constraints (such as one capacitor only), and "
+    "clearly state that the request cannot be met. "
     "Never change, relax, or reinterpret the requested tolerance or constraints: "
     "judge the design only against the request as stated (2% if no tolerance is "
     "given). A design that misses the stated tolerance does not meet the spec, "
