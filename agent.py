@@ -39,7 +39,9 @@ DEFAULT_MODEL = "google_genai:gemini-3.8-flash"
 # v3.5 = find_standard_values labels each option ONE / TWO capacitors and always
 #        offers a one-capacitor choice; prompt maps "single"/"one of each" to
 #        allow_parallel_capacitors=false (v3.4 Flash-Lite used parallel parts anyway).
-PROMPT_VERSION = "v3.5"
+# v3.6 = v3.5 without the v3.4 "never relax the tolerance" sentence: 10-run tests showed
+#        it caused the part-count failures (v3.3 40/40 vs v3.4 28/40 on infeasible cases).
+PROMPT_VERSION = "v3.6"
 
 SYSTEM_PROMPT = (
     "You are an analog design assistant for RC low-pass filters. "
@@ -60,10 +62,7 @@ SYSTEM_PROMPT = (
     "If no design can meet the request, simulate the closest option that still "
     "satisfies the request's other constraints (such as one capacitor only), and "
     "clearly state that the request cannot be met. "
-    "Never change, relax, or reinterpret the requested tolerance or constraints: "
-    "judge the design only against the request as stated (2% if no tolerance is "
-    "given). A design that misses the stated tolerance does not meet the spec, "
-    "however close it is. "
+
     "Set meets_spec to true only if the simulated cutoff is within the requested "
     "tolerance and every constraint in the request is satisfied; otherwise false. "
     "Report R, C, and the simulated cutoff; for parallel capacitors, name both parts. "
