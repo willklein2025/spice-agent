@@ -12,7 +12,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
-from agent import AgentStoppedEarly, run_agent
+from agent import AgentStoppedEarly, answer_corrections, run_agent
 
 
 class ScriptedModel(BaseChatModel):
@@ -53,9 +53,37 @@ class AgentEndToEndTests(unittest.TestCase):
         with patch("agent.build_chat_model", return_value=model):
             design, messages = asyncio.run(run_agent("2.5 kHz with 10 nF", "scripted"))
         self.assertEqual((design.r_ohms, design.c_farads), (6340, 1e-8))
+        self.assertEqual(answer_corrections(messages), 0)        # correct first time
         tool_results = [m.text for m in messages if m.type == "tool"]
         self.assertIn("10 nF", tool_results[0])                 # lookup result
         self.assertIn("VERIFIED BY SIMULATION: measured cutoff 2510.33 Hz", tool_results[1])  # real ngspice
+
+    def slip_script(self, second_answer_c):
+        """Flash-Lite v3.6 limit-r-max: simulated 470 nF, then answered 4.7 uF."""
+        return ScriptedModel(script=[
+            ("find_standard_values", {"target_cutoff_hz": 50}),
+            ("simulate_rc_lowpass", {"r_ohms": 6810, "c_farads": 4.7e-7}),
+            ("FilterDesign", {"r_ohms": 6810, "c_farads": 4.7e-6, "simulated_cutoff_hz": 49.725,
+                              "meets_spec": True, "notes": "Capacitor is 470 nF."}),
+            ("FilterDesign", {"r_ohms": 6810, "c_farads": second_answer_c,
+                              "simulated_cutoff_hz": 49.725, "meets_spec": True,
+                              "notes": "Corrected."}),
+        ])
+
+    def test_answer_check_corrects_a_unit_slip(self) -> None:
+        with patch("agent.build_chat_model", return_value=self.slip_script(4.7e-7)):
+            design, messages = asyncio.run(run_agent("50 Hz, R at most 10k", "scripted"))
+        self.assertEqual((design.r_ohms, design.c_farads), (6810, 4.7e-7))
+        self.assertEqual(answer_corrections(messages), 1)
+        correction = next(m for m in messages if m.type == "human" and m.name == "answer_check")
+        self.assertIn("c_farads=4.7e-06", correction.text)
+        self.assertIn("r_ohms=6810, c_farads=4.7e-07", correction.text)   # what it really ran
+
+    def test_answer_check_asks_only_once(self) -> None:
+        with patch("agent.build_chat_model", return_value=self.slip_script(4.7e-6)):
+            design, messages = asyncio.run(run_agent("50 Hz, R at most 10k", "scripted"))
+        self.assertEqual(design.c_farads, 4.7e-6)          # still wrong: returned for grading
+        self.assertEqual(answer_corrections(messages), 1)   # no endless loop
 
     def test_runaway_is_stopped_with_its_trace(self) -> None:
         model = ScriptedModel(script=[("loop", {})])

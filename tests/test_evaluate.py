@@ -214,7 +214,7 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(results, [recorded_result])
 
     def test_run_agent_returns_structured_design_and_messages(self) -> None:
-        messages = [FakeMessage([])]
+        messages = self.messages           # includes a simulation matching self.design
         agent = MagicMock()
         agent.ainvoke = AsyncMock(
             return_value={
@@ -543,6 +543,50 @@ class EvaluateTests(unittest.TestCase):
                 path.write_text(json.dumps(dict(self.case, **extra)) + "\n", encoding="utf-8")
                 with self.assertRaises(ValueError):
                     load_cases(path)
+
+    def test_answer_check_helpers(self) -> None:
+        from agent import answer_was_simulated, correction_message
+        self.assertTrue(answer_was_simulated(self.design, self.messages))
+        slipped = self.design.model_copy(update={"c_farads": 1e-7})
+        self.assertFalse(answer_was_simulated(slipped, self.messages))
+        text = correction_message(slipped, self.messages).text
+        self.assertIn("never simulated those exact values", text)
+        self.assertIn("r_ohms=6366.2, c_farads=1e-08", text)
+        text = correction_message(slipped, []).text
+        self.assertIn("did not run simulate_rc_lowpass at all", text)
+
+    def test_unverified_answer_gets_one_correction_then_is_accepted(self) -> None:
+        unsimulated = self.design.model_copy(update={"c_farads": 2e-8})
+        agent = MagicMock()
+        agent.ainvoke = AsyncMock(side_effect=[
+            {"structured_response": unsimulated, "messages": list(self.messages)},
+            {"structured_response": self.design, "messages": list(self.messages)},
+        ])
+        client = MagicMock()
+        client.get_tools = AsyncMock(return_value=[])
+        with (
+            patch("agent.MultiServerMCPClient", return_value=client),
+            patch("agent.create_agent", return_value=agent),
+        ):
+            design, _ = asyncio.run(run_agent("Design a filter.", "test-model"))
+        self.assertEqual(design, self.design)
+        self.assertEqual(agent.ainvoke.await_count, 2)
+        sent = agent.ainvoke.await_args_list[1].args[0]["messages"][-1]
+        self.assertEqual(sent.name, "answer_check")
+
+    def test_evaluation_records_answer_corrections(self) -> None:
+        correction = MagicMock(type="human", tool_calls=[], usage_metadata=None,
+                               response_metadata={})
+        correction.name = "answer_check"
+        messages = self.messages + [correction]
+        with (
+            patch("evaluate.run_agent", new=AsyncMock(return_value=(self.design, messages))),
+            patch("evaluate.simulate_rc",
+                  return_value={"fc_measured_hz": 2500.5, "fc_theoretical_hz": 2500}),
+        ):
+            result = asyncio.run(evaluate_case(self.case, "test-model"))
+        self.assertEqual(result["answer_corrections"], 1)
+        self.assertTrue(result["passed"])
 
     # --- Model construction --------------------------------------------------
 

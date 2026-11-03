@@ -10,6 +10,7 @@ Model names use the form "provider:model":
 """
 import argparse
 import asyncio
+import math
 import sys
 
 from langchain.agents import create_agent
@@ -19,7 +20,7 @@ from langchain.agents.middleware import (
     ModelRetryMiddleware,
 )
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from pydantic import BaseModel, Field
 
@@ -41,7 +42,10 @@ DEFAULT_MODEL = "google_genai:gemini-3.8-flash"
 #        allow_parallel_capacitors=false (v3.4 Flash-Lite used parallel parts anyway).
 # v3.6 = v3.5 without the v3.4 "never relax the tolerance" sentence: 10-run tests showed
 #        it caused the part-count failures (v3.3 40/40 vs v3.4 28/40 on infeasible cases).
-PROMPT_VERSION = "v3.6"
+# v3.7 = prompt unchanged; run_agent checks the final R and C against the simulations
+#        actually run and sends one correction if they differ (v3.6 Flash-Lite once
+#        simulated 470 nF but answered 4.7 uF).
+PROMPT_VERSION = "v3.7"
 
 SYSTEM_PROMPT = (
     "You are an analog design assistant for RC low-pass filters. "
@@ -72,6 +76,9 @@ SYSTEM_PROMPT = (
 
 # Cost and runaway protection.
 MAX_MODEL_CALLS = 8          # model calls allowed per request; good runs use 2-4
+MAX_ANSWER_CORRECTIONS = 1   # times the agent is asked to fix an unverified final answer
+SIMULATE_TOOL = "simulate_rc_lowpass"
+ANSWER_CHECK_NAME = "answer_check"   # marks correction messages in the conversation
 MAX_OUTPUT_TOKENS = 2048     # cap on each model response (Gemini: thinking included)
 MODEL_CALL_TIMEOUT_S = 120   # seconds per model call (local CPU models are slow)
 LOCAL_CONTEXT_TOKENS = 8192  # Ollama's default context is too small for the tools + history
@@ -143,6 +150,57 @@ def build_chat_model(model: str) -> BaseChatModel | str:
     return model
 
 
+def simulated_values(messages: list[BaseMessage]) -> list[tuple[float, float]]:
+    """(r_ohms, c_farads) for every simulate_rc_lowpass call, in order."""
+    values = []
+    for message in messages:
+        if message.type != "ai":
+            continue
+        for call in message.tool_calls:
+            args = call.get("args", {})
+            if call.get("name") == SIMULATE_TOOL and all(
+                isinstance(args.get(key), (int, float)) for key in ("r_ohms", "c_farads")
+            ):
+                values.append((float(args["r_ohms"]), float(args["c_farads"])))
+    return values
+
+
+def answer_was_simulated(design: FilterDesign, messages: list[BaseMessage]) -> bool:
+    """True if the final R and C exactly match a simulation the agent ran."""
+    return any(
+        math.isclose(design.r_ohms, r, rel_tol=1e-9)
+        and math.isclose(design.c_farads, c, rel_tol=1e-9)
+        for r, c in simulated_values(messages)
+    )
+
+
+def correction_message(design: FilterDesign, messages: list[BaseMessage]) -> HumanMessage:
+    """Tell the agent its answer does not match anything it simulated."""
+    simulations = simulated_values(messages)
+    if simulations:
+        ran = "; ".join(f"r_ohms={r:g}, c_farads={c:g}" for r, c in simulations)
+        detail = f"The simulations you ran were: {ran}."
+    else:
+        detail = "You did not run simulate_rc_lowpass at all."
+    text = (
+        f"Answer check failed: your final answer gives r_ohms={design.r_ohms:g}, "
+        f"c_farads={design.c_farads:g}, but you never simulated those exact values. "
+        f"{detail} Give your final answer again using exactly the values of the "
+        "simulation you chose, or simulate the new values first. Check the units: "
+        "c_farads is in farads (for example 470 nF = 4.7e-07)."
+    )
+    return HumanMessage(content=text, name=ANSWER_CHECK_NAME)
+
+
+def answer_corrections(messages: list[BaseMessage]) -> int:
+    """How many correction messages the answer check sent in this conversation."""
+    return sum(
+        1
+        for message in messages
+        if message.type == "human" and getattr(message, "name", None) == ANSWER_CHECK_NAME
+    )
+
+
 async def run_agent(
     request: str,
     model: str = DEFAULT_MODEL,
@@ -181,6 +239,22 @@ async def run_agent(
         middleware=middleware,
     )
     result = await agent.ainvoke({"messages": [{"role": "user", "content": request}]})
+    design, messages = _final_design(result)
+
+    # Answer check: the final values must be ones the agent actually simulated.
+    # If not, ask once for a correction; the conversation keeps the full history.
+    for _ in range(MAX_ANSWER_CORRECTIONS):
+        if answer_was_simulated(design, messages):
+            break
+        result = await agent.ainvoke(
+            {"messages": messages + [correction_message(design, messages)]}
+        )
+        design, messages = _final_design(result)
+    return design, messages
+
+
+def _final_design(result: dict) -> tuple[FilterDesign, list[BaseMessage]]:
+    """Pull the structured answer out of an agent result, or explain why there is none."""
     messages = result["messages"]
     if result.get("structured_response") is None:
         last_text = messages[-1].text if messages else ""
@@ -190,8 +264,7 @@ async def run_agent(
             else "agent ended without a final design"
         )
         raise AgentStoppedEarly(reason, messages)
-    design = FilterDesign.model_validate(result["structured_response"])
-    return design, messages
+    return FilterDesign.model_validate(result["structured_response"]), messages
 
 
 async def main(request: str, model: str = DEFAULT_MODEL) -> None:

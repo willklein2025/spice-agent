@@ -15,7 +15,14 @@ from typing import Any
 
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 
-from agent import DEFAULT_MODEL, PROMPT_VERSION, AgentStoppedEarly, FilterDesign, run_agent
+from agent import (
+    DEFAULT_MODEL,
+    PROMPT_VERSION,
+    AgentStoppedEarly,
+    FilterDesign,
+    answer_corrections,
+    run_agent,
+)
 from spice_agent.simulate import simulate_rc
 from spice_agent.standard_values import E_SERIES, is_standard_value
 
@@ -218,6 +225,7 @@ def describe_trace(record: dict[str, Any], messages: list[Any]) -> None:
     """Add what the agent did (tools, tokens, models) to a result record."""
     record["tool_call_count"] = count_tool_calls(messages)
     record["lookups"] = lookup_count(messages)
+    record["answer_corrections"] = answer_corrections(messages)
     record["simulations"] = simulations_run(messages)
     record["tokens"] = total_tokens(messages)
     record["model_names"] = model_names_used(messages)
@@ -442,6 +450,7 @@ def summarize(results: list[dict[str, Any]]) -> None:
     average_seconds = sum(result["seconds"] for result in results) / len(results)
     average_tokens = sum(result.get("tokens", 0) for result in results) / len(results)
     runaways = sum("failure_reason" in result for result in results)
+    corrected = sum(bool(result.get("answer_corrections")) for result in results)
     print(
         f"Pass rate: {passed}/{len(results)} ({passed / len(results):.1%}) | "
         f"Average tool calls: {average_tool_calls:.2f} | "
@@ -450,6 +459,8 @@ def summarize(results: list[dict[str, Any]]) -> None:
     )
     if runaways:
         print(f"  Stopped by call or time limit: {runaways}")
+    if corrected:
+        print(f"  Answers corrected by the answer check: {corrected}")
 
 
 async def evaluate(
@@ -499,6 +510,8 @@ async def evaluate(
             f"{result.get('tokens', 0):,} tokens, "
             f"{result['seconds']:.2f} s)"
         )
+        if result.get("answer_corrections"):
+            print(f"  Answer check asked for a correction ({result['answer_corrections']}x)")
         failed_checks = [name for name, ok in result.get("checks", {}).items() if not ok]
         if failed_checks and "failure_reason" not in result and "error" not in result:
             print(f"  Failed checks: {', '.join(failed_checks)}")
