@@ -4,13 +4,11 @@
 
 The agent takes a request like *"Our board already has a 2.2 kΩ series resistor on this net. What capacitor to ground gives a 7 kHz corner?"*, picks standard parts, simulates the design in ngspice through an MCP server, and returns a structured answer. A separate evaluator re-simulates every answer independently, checks it against the request, and records what the agent did and what it cost.
 
-<!-- Optional: a short GIF of one agent run here (Peek on Linux records a terminal window). -->
-
 ---
 
 ## Why I built this
 
-I have 18 years working with analog/mixed-signal design, SPICE and Spectre simulations, CAD flows and EDA tool support(Silvaco, EXAR, Cadeka). This project was designed to put some of that knowledge together with an AI agent. The concept is fairly easy, but this gave me practice working with an AI model to run simulations. It allowed me to find some of the pitfalls, how to avoid them and how to correct for them with prompts, gaurdrails, and constraints. CAD teams are using AI agents and they want to be able to trust the results. This process allowed me to find where the models would cheat or hallucinate, and how to protect against that. This project gives an agent a real SPICE simulator where it can run circuit simulations and compare the results to the calculated value. Then it can output whether it was accurate or mistaken. It took several iterations to settle on the final results, but it now produces reliable simulations and output.
+I have 18 years working with analog/mixed-signal design, SPICE and Spectre simulations, CAD flows and EDA tool support (Silvaco, Exar, Cadeka). This project was designed to put some of that knowledge together with an AI agent. The concept is fairly easy, but this gave me practice working with an AI model to run simulations. It allowed me to find some of the pitfalls, how to avoid them and how to correct for them with prompts, guardrails, and constraints. CAD teams are using AI agents and they want to be able to trust the results. This process allowed me to find where the models would cheat or hallucinate, and how to protect against that. This project gives an agent a real SPICE simulator where it can run circuit simulations and compare the results to the calculated value. Then it can output whether it was accurate or mistaken. It took several iterations to settle on the final results, but it now produces reliable simulations and output.
 
 The simulation itself is just a lowpass filter using standard values for resistors and capacitors as you would for mounting the circuit on a board.
 
@@ -28,7 +26,9 @@ Final version (v3.7), 22 test cases × 3 runs each:
 | Avg time per run | 17.6 s † | 6.6 s |
 | Avg tokens per run | ~3,130 | ~3,250 |
 | Whole 66-run evaluation | ~207,000 tokens | ~214,000 tokens |
-| Cost of a full evaluation | It is difficult to compare costs between the two models, but the input prices listed are 2.5 times as much for the 3.8 model as they are for the 3.5 model. The tokens are roughly similar so the older model will be much more cost effective.
+| Cost of a full evaluation | ~2.5× Flash-Lite's input price | ~$1 per 150 runs |
+
+It is difficult to compare costs between the two models, but the input prices listed are 2.5 times as much for the 3.8 model as they are for the 3.5 model. The tokens are roughly similar so the older model will be much more cost effective.
 
 † Gemini 3.8 was measured on v3.6, which differs from v3.7 only by the answer check (see below), which never fired on these cases. Times vary with API load on the day; compare tokens and tool calls rather than seconds across days.
 
@@ -213,8 +213,8 @@ Results for v2.1 through v3.2 are Gemini 3.8 Flash unless noted. Before the call
 
 <!-- Two lines and links. -->
 William Klein — analog/mixed-signal and CAD engineer applying AI to chip design.
-[LinkedIn](https://www.linkedin.com/in/wmmklein)· [Email](wmklein@gmail.com)
+[LinkedIn](https://www.linkedin.com/in/wmmklein) · [Email](mailto:wmklein@gmail.com)
 
 ## License
 
-MIT <!-- add a LICENSE file -->
+This project is licensed under the [MIT License](LICENSE).
