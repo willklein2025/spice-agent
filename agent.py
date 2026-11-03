@@ -34,7 +34,9 @@ DEFAULT_MODEL = "google_genai:gemini-3.8-flash"
 # v3.2 = prompt unchanged; simulate_rc_lowpass now leads with VERIFIED / NOT VERIFIED
 #        so an unmeasurable cutoff cannot be mistaken for a simulated one.
 # v3.3 = simulated_cutoff_hz may be null ("not simulated") instead of a placeholder 0.
-PROMPT_VERSION = "v3.3"
+# v3.4 = never relax the requested tolerance or constraints (Flash-Lite once "relaxed"
+#        2% to 5% on its own and reported success).
+PROMPT_VERSION = "v3.4"
 
 SYSTEM_PROMPT = (
     "You are an analog design assistant for RC low-pass filters. "
@@ -52,6 +54,10 @@ SYSTEM_PROMPT = (
     "Do not search for part combinations yourself. "
     "If no design can meet the request, simulate the closest option and clearly "
     "state that the request cannot be met. "
+    "Never change, relax, or reinterpret the requested tolerance or constraints: "
+    "judge the design only against the request as stated (2% if no tolerance is "
+    "given). A design that misses the stated tolerance does not meet the spec, "
+    "however close it is. "
     "Set meets_spec to true only if the simulated cutoff is within the requested "
     "tolerance and every constraint in the request is satisfied; otherwise false. "
     "Report R, C, and the simulated cutoff; for parallel capacitors, name both parts. "
