@@ -8,9 +8,9 @@ The agent takes a request like *"Our board already has a 2.2 kΩ series resistor
 
 ## Why I built this
 
-I have 18 years working with analog/mixed-signal design, SPICE and Spectre simulations, CAD flows and EDA tool support (Silvaco, Exar, Cadeka). This project was designed to put some of that knowledge together with an AI agent. The concept is fairly easy, but this gave me practice working with an AI model to run simulations. It allowed me to find some of the pitfalls, how to avoid them and how to correct for them with prompts, guardrails, and constraints. CAD teams are using AI agents and they want to be able to trust the results. This process allowed me to find where the models would cheat or hallucinate, and how to protect against that. This project gives an agent a real SPICE simulator where it can run circuit simulations and compare the results to the calculated value. Then it can output whether it was accurate or mistaken. It took several iterations to settle on the final results, but it now produces reliable simulations and output.
+I spent 18 years in analog and mixed-signal design, SPICE and Spectre simulation, CAD flows, and EDA tool support at Silvaco, Cadeka, and Exar. CAD teams are now putting AI agents in front of their tools, and the question they all ask is whether they can trust the results.
 
-The simulation itself is just a lowpass filter using standard values for resistors and capacitors as you would for mounting the circuit on a board.
+This project puts that question to the test. I gave an AI agent a real SPICE simulator and a deliberately simple job: design an RC low-pass filter from standard resistor and capacitor values, the way you would for a real board. Then I measured where it cheated, hallucinated, or broke the rules, and fixed each problem with better tools, guardrails, and constraints. After several measured iterations, both models tested produce verified designs on every test case.
 
 ---
 
