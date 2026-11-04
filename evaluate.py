@@ -49,6 +49,9 @@ EXPECTATIONS = {"design", "infeasible"}
 # Problems no amount of retrying will fix during this run. The evaluation stops,
 # nothing is recorded for the case, and it runs again next time.
 FATAL_ERROR_HINTS = {
+    "401": "The API key was rejected. Check GOOGLE_API_KEY in your .env file.",
+    "API key not valid": "The API key was rejected. Check GOOGLE_API_KEY in your .env file.",
+    "No Google AI Studio API key": "No API key found. Put GOOGLE_API_KEY in your .env file.",
     "402": "API credits are used up. Top up, then rerun to continue.",
     "429": "Daily quota reached. Rerun after it resets to continue.",
     "does not support tools": (

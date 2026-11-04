@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -604,6 +605,36 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(type(model).__name__, "ChatGoogleGenerativeAI")
         self.assertEqual(model.reasoning_effort, "low")
         self.assertEqual(model.max_output_tokens, 2048)
+
+    def test_prompts_for_gemini_api_key_when_missing(self) -> None:
+        terminal = MagicMock()
+        terminal.isatty.return_value = True
+        with (
+            patch.dict("os.environ", {"GOOGLE_API_KEY": ""}),
+            patch("agent.load_dotenv"),
+            patch("agent.sys.stdin", terminal),
+            patch("agent.getpass.getpass", return_value="prompted-key") as prompt,
+        ):
+            model = build_chat_model("google_genai:gemini-3.8-flash")
+            self.assertEqual(os.environ["GOOGLE_API_KEY"], "prompted-key")
+        prompt.assert_called_once_with("Google AI Studio API key: ")
+        self.assertEqual(type(model).__name__, "ChatGoogleGenerativeAI")
+
+    def test_loads_gemini_api_key_from_dotenv(self) -> None:
+        def load_test_key() -> None:
+            self.assertNotIn("GOOGLE_API_KEY", os.environ)
+            os.environ["GOOGLE_API_KEY"] = "dotenv-key"
+
+        with (
+            patch.dict("os.environ", {"GOOGLE_API_KEY": ""}),
+            patch("agent.load_dotenv", side_effect=load_test_key) as load,
+            patch("agent.getpass.getpass") as prompt,
+        ):
+            model = build_chat_model("google_genai:gemini-3.8-flash")
+
+        load.assert_called_once_with()
+        prompt.assert_not_called()
+        self.assertEqual(type(model).__name__, "ChatGoogleGenerativeAI")
 
     def test_does_not_retry_errors_that_cannot_succeed(self) -> None:
         self.assertTrue(should_retry(RuntimeError("503 UNAVAILABLE high demand")))

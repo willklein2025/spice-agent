@@ -10,9 +10,12 @@ Model names use the form "provider:model":
 """
 import argparse
 import asyncio
+import getpass
 import math
+import os
 import sys
 
+from dotenv import load_dotenv
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
     ModelCallLimitMiddleware,
@@ -121,6 +124,23 @@ def should_retry(error: Exception) -> bool:
     return not any(marker in message for marker in NON_RETRYABLE_MARKERS)
 
 
+def _ensure_google_api_key() -> None:
+    if not os.environ.get("GOOGLE_API_KEY"):
+        os.environ.pop("GOOGLE_API_KEY", None)
+    load_dotenv()
+    if os.environ.get("GOOGLE_API_KEY"):
+        return
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "GOOGLE_API_KEY is not set and no interactive terminal is available. "
+            "Set it in the environment, or prompt for it with getpass in a notebook."
+        )
+    api_key = getpass.getpass("Google AI Studio API key: ").strip()
+    if not api_key:
+        raise RuntimeError("No Google AI Studio API key was entered.")
+    os.environ["GOOGLE_API_KEY"] = api_key
+
+
 def build_chat_model(model: str) -> BaseChatModel | str:
     """Turn a "provider:model" name into a chat model with cost limits applied.
 
@@ -138,6 +158,7 @@ def build_chat_model(model: str) -> BaseChatModel | str:
             client_kwargs={"timeout": MODEL_CALL_TIMEOUT_S},
         )
     if provider == "google_genai":
+        _ensure_google_api_key()
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         return ChatGoogleGenerativeAI(
