@@ -8,3 +8,5 @@ __pycache__/
 
 # Local secrets
 .env
+
+docling-env/
